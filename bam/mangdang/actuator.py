@@ -27,9 +27,10 @@ class MD01Actuator(VoltageControlledActuator):
 
     .. note::
 
-        Values marked ``TODO`` must be measured on the bench and/or read from
-        the MD01 datasheet before this actuator can be identified. See
-        ``ADDING_A_MOTOR.md`` for where each quantity comes from.
+        ``max_current`` and the kt / R / armature ranges below come from the
+        servo-3 bench recordings (``data_md01-3``), not from a datasheet;
+        ``error_gain`` and ``max_pwm`` are still inherited from the Feetech
+        STS3215 and have not been measured on the MD01.
     """
 
     def __init__(self, testbench_class: Testbench):
@@ -48,21 +49,29 @@ class MD01Actuator(VoltageControlledActuator):
             # Maximum duty-cycle magnitude; inherited from the measurements on
             # the other BAM voltage-controlled servos — TODO(md01): measure.
             max_pwm=1.0,
-            # Firmware current limit [A]. The AT32 reads the torque field of a
-            # position command as a max current cap, so this is a real cap; it
-            # is conservative until the MD01 rating is confirmed.
-            max_current=1.4,
+            # Effective current limit [A]. The recorder sends a 900 mA cap in
+            # the position frame, but the current the board actually sustains
+            # in data_md01-2/3 plateaus at ~440 mA (0.171 kg on 0.15 m stalls
+            # there for seconds; transients reach ~590 mA). This is the limit
+            # the pendulum sees, so it is the one the model must saturate at.
+            # It is a property of the AT32 current loop as configured on the
+            # bench (robot presets reach ~900 mA) — re-measure if that changes.
+            max_current=0.45,
         )
 
     def initialize(self):
-        # Torque constant [Nm/A] or [V/(rad/s)] — TODO: datasheet.
-        self.model.kt = Parameter(0.223, 0.0, 1.0) 
+        # Torque constant [Nm/A] or [V/(rad/s)]. Stall on the bench
+        # (0.20 Nm at ~440 mA) gives ~0.45 at the output; bounds leave room
+        # for the fit to trade it against R.
+        self.model.kt = Parameter(0.5, 0.05, 2.0)
 
-        # Motor resistance [Ohm]; often estimable as vin / I_stall — TODO.
-        self.model.R = Parameter(8.5, 7.5, 9.5)  # TODO
+        # Effective resistance [Ohm], output side. Fits on data_md01-3 pinned
+        # the previous 7.5–9.5 range at its lower bound, so keep it wide.
+        self.model.R = Parameter(10.0, 2.0, 40.0)
 
-        # Rotor / apparent inertia [kg m^2] — TODO: datasheet or fit seed.
-        self.model.armature = Parameter(2.25e-4, 1.1e-4, 6.8e-4) 
+        # Rotor / apparent inertia at the output [kg m^2]; earlier fits sat on
+        # the 1.1e-4 floor of the old range.
+        self.model.armature = Parameter(3e-4, 1e-5, 5e-3)
 
         # Optional: fit a ratio on top of error_gain (see ST3025Actuator).
         # self.model.error_gain_ratio = Parameter(1.0, 0.1, 10.0)
