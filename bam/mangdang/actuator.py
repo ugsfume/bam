@@ -6,7 +6,7 @@
 
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-from bam.actuator import VoltageControlledActuator
+from bam.actuator import CurrentControlledActuator, VoltageControlledActuator
 from bam.parameter import Parameter
 from bam.testbench import Testbench
 
@@ -80,6 +80,78 @@ class MD01Actuator(VoltageControlledActuator):
             self.error_gain = log["error_gain"]
         if "max_pwm" in log:
             self.max_pwm = log["max_pwm"]
+
+    def get_extra_inertia(self) -> float:
+        return self.model.armature.value
+
+
+class MD01CurrentActuator(CurrentControlledActuator):
+    """Mangdang MD01 modelled as a current-controlled servo (name ``md01i``).
+
+    The AT32 driver board runs a position loop whose output is a *current*
+    setpoint for an inner current loop (``setpoint_cur_mA`` in its live
+    values). On the servo-3 bench recordings (``data_md01-3``) the measured
+    motor current is a function of ``kp * error`` alone — the same curve for
+    every ``kp`` from 60 to 140 — roughly linear at ~30 mA per rad of error
+    per unit of ``kp`` and saturating at ~440 mA. That is the
+    :class:`~bam.actuator.CurrentControlledActuator` structure:
+
+    ``i = clip(kp * error_gain * error_gain_ratio * (q_target - q), ±current_limit)``,
+    ``tau = kt * i``
+
+    with ``error_gain_ratio`` and ``current_limit`` fitted. Fitted this way the
+    simulated current reproduces the recorded one (which the fit never sees),
+    whereas the voltage-controlled :class:`MD01Actuator` needs 3–10x the real
+    current to match the same angles. Identification MAE on ``data_md01-3``:
+    24–29 mrad here vs 50 mrad (voltage law, 0.45 A cap) vs 90 mrad (as
+    originally committed).
+
+    The fitted ``current_limit`` (~0.45 A) is the bench configuration of the
+    current loop, not the motor's rating: the robot firmware presets reach
+    ~0.9 A. Re-identify if the AT32 current-loop gains change.
+    """
+
+    def __init__(self, testbench_class: Testbench):
+        super().__init__(
+            testbench_class,
+            vin=12.0,
+            kp=80.0,
+            # A per rad of error per unit kp; measured on servo 3 in the
+            # linear region of the I(kp*error) curve at |dq| < 0.3 rad/s.
+            error_gain=0.030,
+        )
+
+    def initialize(self):
+        # Torque constant at the output [Nm/A]; bench stall gives ~0.5.
+        self.model.kt = Parameter(0.5, 0.05, 2.0)
+
+        # Effective resistance [Ohm]; only bounds the current at speed here.
+        self.model.R = Parameter(10.0, 2.0, 40.0)
+
+        # Apparent inertia at the output [kg m^2].
+        self.model.armature = Parameter(3e-4, 1e-5, 5e-3)
+
+        # Sustained current limit of the current loop as configured [A].
+        self.model.current_limit = Parameter(0.45, 0.2, 1.0)
+
+        # Scale on error_gain, so the measured 0.030 is only a starting point.
+        self.model.error_gain_ratio = Parameter(1.0, 0.3, 3.0)
+
+    def compute_control(self, q_target, q, dq, dt):
+        current = (
+            (q_target - q)
+            * self.kp
+            * self.error_gain
+            * self.model.error_gain_ratio.value
+        )
+
+        # What the supply can drive against the back-EMF
+        current_high = (self.vin - self.model.kt.value * dq) / self.model.R.value
+        current_low = (-self.vin - self.model.kt.value * dq) / self.model.R.value
+        current = self.backend.clamp(current, current_low, current_high)
+
+        limit = self.model.current_limit.value
+        return self.backend.clamp(current, -limit, limit)
 
     def get_extra_inertia(self) -> float:
         return self.model.armature.value
