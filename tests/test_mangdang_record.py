@@ -38,7 +38,7 @@ def test_dry_run_log_carries_the_configuration(tmp_path):
         "at32_kp_position": 80.0, "at32_kd_position": 0.0, "at32_kp_current": 6e-4,
         "at32_kff_current": 3e-4, "at32_max_pwm_duty_cycle": 0.99, "cur_cap_ma": 1500,
         "zero_dd": 1540.0, "supply_v": 12.0, "supply_ilim_a": 3.0,
-        "sample_scheme": "set_pos_reply", "servo_id": 6,
+        "sample_scheme": "set_pos_reply_lag1", "servo_id": 6,
     }.items():
         assert log[key] == value, key
     entries = log["entries"]

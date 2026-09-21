@@ -43,7 +43,6 @@ import argparse
 import datetime
 import json
 import os
-import struct
 import subprocess
 import time
 
@@ -324,16 +323,11 @@ def configure_at32(io, servo: int) -> dict:
 def decode_temp(res: int) -> float:
     """Decode the feedback ``res`` word into a temperature [C].
 
-    The robot firmware build of 2026-09-17 prints a temperature from this
-    word; its encoding was established at the bench (see the campaign-2 plan):
-    IEEE float when plausible, else tenths of a degree.
+    The AT32 puts an integer in tenths of a degree there (334 -> 33.4 C,
+    checked against the robot firmware's own readout on 2026-09-21).
     """
-    as_float = struct.unpack("<f", struct.pack("<I", res & 0xFFFFFFFF))[0]
-    if 0.0 < as_float < 200.0:
-        return float(as_float)
-    if 0 < res < 2000:
-        return res / 10.0
-    return 0.0
+    res &= 0xFFFFFFFF
+    return res / 10.0 if 0 < res < 3000 else 0.0
 
 
 def git_revision() -> str:
@@ -387,6 +381,11 @@ def run_trajectory(io, servo: int, recorder: Recorder, trajectory) -> list[dict]
     torque_enable = False
     last_control_t = 0.0
     goal_position, _ = trajectory(0.0)
+    # The AT32 answers a frame with the state it had when the PREVIOUS frame
+    # arrived (measured 2026-09-21: a step's current is still zero in the
+    # reply 3.3 ms later and appears one frame after), so the feedback of
+    # transaction k is stamped with transaction k-1's time, goal and enable.
+    previous: tuple[float, float, bool] | None = None
 
     while True:
         t = time.perf_counter() - start
@@ -419,11 +418,13 @@ def run_trajectory(io, servo: int, recorder: Recorder, trajectory) -> list[dict]
         entry = recorder.read_data(response)
         t1 = time.perf_counter() - start
 
-        entry["timestamp"] = (t0 + t1) / 2.0
-        entry["goal_position"] = float(goal_position)
-        entry["torque_enable"] = bool(torque_enable)
-        recorder.compute_duty_cycle(goal_position, entry["position"])
-        entries.append(entry)
+        this = ((t0 + t1) / 2.0, float(goal_position), bool(torque_enable))
+        if previous is not None:
+            entry["timestamp"], entry["goal_position"], entry["torque_enable"] = previous
+            recorder.compute_duty_cycle(entry["goal_position"], entry["position"])
+            entry["duty_cycle"] = float(recorder.duty_cycle)
+            entries.append(entry)
+        previous = this
 
         if abs(entry["speed"]) > MAX_ABSOLUTE_SPEED:
             print(
@@ -521,7 +522,7 @@ def main() -> None:
             "supply_ilim_a": args.supply_ilim,
             "supply_note": args.supply_note,
             "temp_start_c": temp_start,
-            "sample_scheme": "set_pos_reply",
+            "sample_scheme": "set_pos_reply_lag1",
             "recorder_git": git_revision(),
             **{f"at32_{name}": value for name, value in at32.items()},
             "entries": entries,
