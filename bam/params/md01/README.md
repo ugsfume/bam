@@ -25,3 +25,10 @@ heavy blocks (>= 0.3 Nm) fit at 31-48 mrad because the housing heated 18 C durin
 and the real stall angle is non-monotonic in kp - a data confound, not a friction-structure
 limit; (2) identified at kd_position 0 while the robot preset runs 800 (up to 133 mrad log-vs-log
 on step targets); (3) the effective torque ceiling is calibrated to a 35-65 C session.
+
+Figures (`figures/`, reference simulator, control recomputed from each model, M1 / M3 / M6 overlaid
+on goal and measured): `validation_kp120.png` = the 35 held-out logs (7 blocks x 5 trajectories,
+per-panel MAE); `training_kp80.png` = the same grid for a training gain, for comparison (it looks the
+same, i.e. no memorisation); six three-row details (angle / speed / current) named
+`<trajectory>_<payload>_<arm>_kp120.png`. Made with `bam/mangdang/tools/plot_validation.py` and
+`bam.plot --actuator md01i --sim --params ... --save-dir`.

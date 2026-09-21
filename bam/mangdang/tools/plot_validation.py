@@ -22,6 +22,7 @@ from bam.model import load_model
 ap = argparse.ArgumentParser()
 ap.add_argument("--logdir", required=True)
 ap.add_argument("--kp", type=float, required=True)
+ap.add_argument("--validation_kp", type=float, default=120.0, help="the held-out gain, for the title")
 ap.add_argument("--params", nargs="+", required=True)
 ap.add_argument("--out", required=True)
 ap.add_argument("--trajectories", default="lift_and_drop,up_and_down,sin_time_square,sin_sin,steps")
@@ -64,7 +65,8 @@ for i, (mass, length) in enumerate(blocks):
             ax.set_xlabel("time [s]", fontsize=8)
 handles, labels = axes[0, 0].get_legend_handles_labels()
 fig.legend(handles, labels, loc="upper right", ncol=len(labels), fontsize=9, frameon=False)
-fig.suptitle(f"MD01 servo 6 — held-out set (kp {args.kp:g}, never seen by the fit): measured vs model rollouts", fontsize=11, x=0.01, ha="left")
+label = "held-out set, never seen by the fit" if args.kp == args.validation_kp else "training set"
+fig.suptitle(f"MD01 servo 6 — kp {args.kp:g} ({label}): measured vs model rollouts", fontsize=11, x=0.01, ha="left")
 fig.tight_layout(rect=(0, 0, 1, 0.97))
 Path(args.out).parent.mkdir(parents=True, exist_ok=True)
 fig.savefig(args.out, dpi=130)
