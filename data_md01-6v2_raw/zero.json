@@ -1,0 +1,21 @@
+{
+  "servo_id": 6,
+  "zero_dd": 1576.7,
+  "rest_plus_dd": [
+    1579.55,
+    1579.7,
+    1579.0
+  ],
+  "rest_minus_dd": [
+    1573.85,
+    1574.1,
+    1574.0
+  ],
+  "stiction_half_band_deg": 0.2716666666666697,
+  "asymmetry_deg": 0.0,
+  "spread_plus_dd": 0.7000000000000455,
+  "spread_minus_dd": 0.25,
+  "scale_dd": 3100.0,
+  "offset_from_centre_deg": 2.670000000000005,
+  "date": "2026-09-21 18:11:13"
+}

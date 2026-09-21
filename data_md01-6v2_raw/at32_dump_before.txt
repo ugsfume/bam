@@ -1,0 +1,57 @@
+# AT32 configuration read through the minipupperesp 7a87aa6 serial CLI on 2026-09-21 before any write.
+# Module on board 1 (CN5): channels 4 (clamped anchor), 5 (outer shaft), 6 (inner shaft, under test). Board 0/2/3 absent.
+# ki_position / control_mode are ids this ESP32 build asks for; the AT32 does not echo them (not supported).
+ 3     reverse_position_sensor    <no reply>
+ 3     min_position_adc           <no reply>
+ 3     max_position_adc           <no reply>
+ 3     range_position_deg         <no reply>
+ 3     reverse_motor              <no reply>
+ 3     kp_position                <no reply>
+ 3     kd_position                <no reply>
+ 3     kp_current                 <no reply>
+ 3     kff_current                <no reply>
+ 3     max_pwm_duty_cycle         <no reply>
+ 3     ki_position                <no reply>
+ 3     control_mode               <no reply>
+ 4 present: pos=511 (SCS 0-1023), cur=0 mA, temp=34.7 C
+ 5 present: pos=512 (SCS 0-1023), cur=0 mA, temp=35.2 C
+ 6 present: pos=513 (SCS 0-1023), cur=0 mA, temp=32.9 C
+ 4 present: pos=511 (SCS 0-1023), cur=0 mA, temp=34.8 C
+ 5 present: pos=512 (SCS 0-1023), cur=0 mA, temp=35.2 C
+ 6 present: pos=513 (SCS 0-1023), cur=0 mA, temp=32.8 C
+ 6 set reverse_position_sensor  = 1
+ 6 set min_position_adc         = 0
+ 6 set max_position_adc         = 4096
+ 6 set range_position_deg       = 310
+ 6 set reverse_motor            = 1
+ 6 set kp_position              = 80
+ 6 set kd_position              = 800
+ 6 set kp_current               = 0.0006
+ 6 set kff_current              = 0.0003
+ 6 set max_pwm_duty_cycle       = 0.99
+ 6     ki_position                <no reply>
+ 6     control_mode               <no reply>
+ 4 set reverse_position_sensor  = 1
+ 4 set min_position_adc         = 0
+ 4 set max_position_adc         = 4096
+ 4 set range_position_deg       = 310
+ 4 set reverse_motor            = 0
+ 4 set kp_position              = 80
+ 4 set kd_position              = 800
+ 4 set kp_current               = 0.0006
+ 4 set kff_current              = 0.0003
+ 4 set max_pwm_duty_cycle       = 0.99
+ 4     ki_position                <no reply>
+ 4     control_mode               <no reply>
+ 5 set reverse_position_sensor  = 0
+ 5 set min_position_adc         = 0
+ 5 set max_position_adc         = 4096
+ 5 set range_position_deg       = 310
+ 5 set reverse_motor            = 1
+ 5 set kp_position              = 80
+ 5 set kd_position              = 800
+ 5 set kp_current               = 0.0006
+ 5 set kff_current              = 0.0003
+ 5 set max_pwm_duty_cycle       = 0.99
+ 5     ki_position                <no reply>
+ 5     control_mode               <no reply>
