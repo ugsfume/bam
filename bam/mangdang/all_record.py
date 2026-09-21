@@ -54,6 +54,26 @@ arg_parser.add_argument(
     action="store_true",
     help="exercise the sweep without hardware",
 )
+arg_parser.add_argument(
+    "--kps",
+    type=str,
+    default=None,
+    help="comma-separated P gains (default: the KPS list below)",
+)
+arg_parser.add_argument(
+    "--trajectories",
+    type=str,
+    default=None,
+    help="comma-separated trajectory names (default: the list below)",
+)
+arg_parser.add_argument("--kd", type=float, default=0.0)
+arg_parser.add_argument(
+    "--extra",
+    type=str,
+    default="",
+    help="extra arguments passed verbatim to bam.mangdang.record, e.g. "
+    "'--zero-dd 1540 --cur 1500 --kp-current 6e-4 --supply-v 12'",
+)
 args = arg_parser.parse_args()
 
 #: P-gain sweep. At least one value is held out for validation in bam.fit.
@@ -68,6 +88,11 @@ trajectories = [
     "steps",
     "half_sine",
 ]
+
+if args.kps:
+    KPS = [float(x) for x in args.kps.split(",")]
+if args.trajectories:
+    trajectories = [x.strip() for x in args.trajectories.split(",") if x.strip()]
 
 
 def run_all() -> None:
@@ -90,11 +115,15 @@ def run_all() -> None:
         str(args.vin),
         "--logdir",
         args.logdir,
+        "--kd",
+        str(args.kd),
     ]
     if args.port:
         command_base += ["--port", args.port]
     if args.dry_run:
         command_base.append("--dry-run")
+    if args.extra:
+        command_base += args.extra.split()
 
     for kp in KPS:
         for trajectory in trajectories:
@@ -110,7 +139,7 @@ def run_all() -> None:
 
             command = command_base + [
                 "--kp",
-                str(kp),
+                str(int(kp) if float(kp).is_integer() else kp),
                 "--trajectory",
                 trajectory,
             ]

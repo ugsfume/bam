@@ -43,18 +43,31 @@ import argparse
 import datetime
 import json
 import os
+import struct
+import subprocess
 import time
 
 import numpy as np
 
 from bam.mangdang.spi import (
-    DEFAULT_CUR_MA,
     DEFAULT_SCALE_DD,
     DEFAULT_VIN,
+    LIVE,
+    PARAM,
     SpiMd01IO,
     pick_port,
 )
 from bam.trajectory import trajectories
+
+#: Current cap [mA] sent in every position frame. The robot firmware sends
+#: 1500 (``CUR_MAX_MA`` in ``minipupperesp/main/main.c``); the pilot datasets
+#: used 900, which is not what the robot runs.
+ROBOT_CUR_MA = 1500
+
+#: The rig zero must leave at least this many deci-degrees of pot track on
+#: both sides of the vertical: the swing reaches ~120 deg and the 50 deg dead
+#: zone starts 155 deg from the centre.
+ZERO_WINDOW_DD = 350
 
 #: Fraction of the PWM range the controller is assumed to reach, inherited from
 #: the measurements on the other BAM voltage-controlled servos.
@@ -106,9 +119,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cur",
         type=int,
-        default=DEFAULT_CUR_MA,
-        help="firmware current cap in position mode [mA]",
+        default=ROBOT_CUR_MA,
+        help="firmware current cap in position mode [mA] (robot: 1500)",
     )
+    parser.add_argument(
+        "--zero-dd",
+        type=float,
+        default=None,
+        help="raw deci-degree reading of the pendulum vertical (bam.mangdang.zero); "
+        "default: pot centre",
+    )
+    parser.add_argument(
+        "--allow-offset",
+        action="store_true",
+        help="record even if the zero leaves < 350 dd of track on one side",
+    )
+    for name in ("kp_current", "kff_current", "max_pwm_duty_cycle"):
+        parser.add_argument(
+            f"--{name.replace('_', '-')}",
+            dest=name,
+            type=float,
+            default=None,
+            help=f"write AT32 {name} (RAM) before the run; default: leave and log",
+        )
+    parser.add_argument("--supply-v", type=float, default=None, help="bench supply voltage setting [V]")
+    parser.add_argument("--supply-ilim", type=float, default=None, help="bench supply current limit [A]")
+    parser.add_argument("--supply-note", type=str, default="", help="free text: supply, cable, rig")
     parser.add_argument(
         "--scale-dd",
         type=float,
@@ -183,8 +219,11 @@ class Recorder:
         self.duty_cycle = float(np.clip(duty, -self.max_pwm, self.max_pwm))
         return self.duty_cycle
 
-    def read_data(self) -> dict:
+    def read_data(self, response: dict | None = None) -> dict:
         """Read one sample from the MD01.
+
+        :param response: The reply of a position command just sent; when
+            given, it is the sample and no extra round trip is made.
 
         :returns: Dict with ``position`` [rad], ``speed`` [rad/s],
             ``duty_cycle``, ``load`` [mA of motor current], ``input_volts`` [V]
@@ -199,7 +238,7 @@ class Recorder:
         the achievable logging rate, which keeps the fit's ``command_delay``
         estimate meaningful.
         """
-        sample = self.io.read_sample(self.servo)
+        sample = self.io.read_sample(self.servo, response)
         volts = self.io.get_present_voltage([self.servo])[0]
 
         return {
@@ -210,7 +249,7 @@ class Recorder:
             "duty_cycle": float(self.duty_cycle),
             "load": float(sample["current_mA"]),
             "input_volts": float(volts),
-            "temp": 0.0,
+            "temp": decode_temp(self.io.last_res),
         }
 
 
@@ -220,7 +259,14 @@ def open_io(port: str | None):
     :param port: Serial device path, or ``None`` to auto-detect it.
     :returns: A :class:`~bam.mangdang.spi.SpiMd01IO` ready for position mode.
     """
-    io = SpiMd01IO(port, baud=args.baud, scale_dd=args.scale_dd, dry_run=args.dry_run)
+    io = SpiMd01IO(
+        port,
+        baud=args.baud,
+        scale_dd=args.scale_dd,
+        dry_run=args.dry_run,
+        zero_dd=args.zero_dd,
+        cur_ma=args.cur,
+    )
     if not args.dry_run:
         # Adopt the AT32's range_position_deg so the host and board agree on
         # what "310 degrees" means; a mismatch would silently squash the range.
@@ -231,7 +277,74 @@ def open_io(port: str | None):
                 f"warning: could not read the board scale ({exc}); "
                 f"using {io.scale_dd / 10.0:.1f} deg"
             )
+    margin = min(io.zero_dd, io.scale_dd - io.zero_dd)
+    if margin < io.scale_dd / 2.0 - ZERO_WINDOW_DD and not args.allow_offset:
+        raise SystemExit(
+            f"zero {io.zero_dd:.0f} dd leaves only {margin:.0f} dd of track on one "
+            f"side (need {io.scale_dd / 2.0 - ZERO_WINDOW_DD:.0f}); re-mount the arm "
+            "closer to the pot centre or pass --allow-offset"
+        )
     return io
+
+
+def configure_at32(io, servo: int) -> dict:
+    """Write the requested loop parameters, read all of them back, verify.
+
+    ``kp_position``/``kd_position`` come from ``--kp``/``--kd`` as before; the
+    current-loop gains are written only when given on the command line. The
+    readback of all ten parameters is returned (flattened into the log as
+    ``at32_<name>``) so every dataset carries the configuration it was
+    recorded under. Nothing is saved to the AT32 flash.
+    """
+    requested = {"kp_position": args.kp, "kd_position": args.kd}
+    for name in ("kp_current", "kff_current", "max_pwm_duty_cycle"):
+        value = getattr(args, name)
+        if value is not None:
+            requested[name] = value
+    for name, value in requested.items():
+        if name == "kp_position":
+            io.set_P_coefficient({servo: value})
+        elif name == "kd_position":
+            io.set_D_coefficient({servo: value})
+        else:
+            io.set_param(servo, PARAM[name], value)
+    if args.dry_run:
+        return {name: float(v) for name, v in requested.items()}
+    readback = io.dump_params(servo)
+    bad = {
+        name: (value, readback[name])
+        for name, value in requested.items()
+        if abs(readback[name] - value) > 1e-6 * max(1.0, abs(value))
+    }
+    if bad:
+        raise RuntimeError(f"AT32 parameter readback mismatch: {bad}")
+    return readback
+
+
+def decode_temp(res: int) -> float:
+    """Decode the feedback ``res`` word into a temperature [C].
+
+    The robot firmware build of 2026-09-17 prints a temperature from this
+    word; its encoding was established at the bench (see the campaign-2 plan):
+    IEEE float when plausible, else tenths of a degree.
+    """
+    as_float = struct.unpack("<f", struct.pack("<I", res & 0xFFFFFFFF))[0]
+    if 0.0 < as_float < 200.0:
+        return float(as_float)
+    if 0 < res < 2000:
+        return res / 10.0
+    return 0.0
+
+
+def git_revision() -> str:
+    """Short git revision of the checkout the recorder runs from, if any."""
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        return subprocess.check_output(
+            ["git", "-C", here, "rev-parse", "--short", "HEAD"], text=True
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
 
 
 def settle_and_measure_zero(io, servo: int, trajectory) -> float:
@@ -247,8 +360,7 @@ def settle_and_measure_zero(io, servo: int, trajectory) -> float:
     goal_position, _ = trajectory(0.0)
 
     io.set_mode({servo: 1})
-    io.set_P_coefficient({servo: args.kp})
-    io.set_D_coefficient({servo: args.kd})
+    configure_at32(io, servo)
     io.set_goal_position({servo: goal_position})
     io.enable_torque([servo])
 
@@ -293,14 +405,18 @@ def run_trajectory(io, servo: int, recorder: Recorder, trajectory) -> list[dict]
             time.sleep(CONTROL_PERIOD)
 
         goal_position = new_goal
-        if torque_enable and t - last_control_t >= CONTROL_PERIOD:
-            io.set_goal_position({servo: goal_position})
-            last_control_t = t
 
-        # Straddle the sample with clock reads so the timestamp sits in the
-        # middle of the readout, as bam.process and bam.fit assume.
+        # One USB round trip per sample: while torque is on the position
+        # command's own reply is the sample (the AT32 answers with the state
+        # it had when the command landed); with torque off a PING refreshes
+        # the feedback. Straddle the transaction with clock reads so the
+        # timestamp sits in the middle, as bam.process and bam.fit assume.
         t0 = time.perf_counter() - start
-        entry = recorder.read_data()
+        response = None
+        if torque_enable:
+            response = io.set_pos_dd(servo, io.rad_to_dd(goal_position))
+            last_control_t = t
+        entry = recorder.read_data(response)
         t1 = time.perf_counter() - start
 
         entry["timestamp"] = (t0 + t1) / 2.0
@@ -354,11 +470,22 @@ def main() -> None:
     filename = f"{args.logdir}/{date}.json"
 
     entries: list[dict] = []
+    at32: dict = {}
+    live_cap = None
+    temp_start = 0.0
     try:
         recorder.q_offset = settle_and_measure_zero(io, args.id, trajectory)
+        at32 = io.dump_params(args.id) if not args.dry_run else configure_at32(io, args.id)
+        if not args.dry_run:
+            live_cap = io.get_live(args.id, LIVE["max_current_mA"])["val"]
+            temp_start = decode_temp(io.last_res)
         print(
-            f"servo {args.id}: zero offset {recorder.q_offset:+.4f} rad, "
-            f"scale {io.scale_dd / 10.0:.1f} deg"
+            f"servo {args.id}: zero {io.zero_dd:.0f} dd, hold error "
+            f"{recorder.q_offset:+.4f} rad, scale {io.scale_dd / 10.0:.1f} deg, "
+            f"kp {at32.get('kp_position')} kd {at32.get('kd_position')} "
+            f"kp_c {at32.get('kp_current')} kff {at32.get('kff_current')} "
+            f"max_pwm {at32.get('max_pwm_duty_cycle')} cap {live_cap} mA "
+            f"temp {temp_start:.1f} C"
         )
 
         entries = run_trajectory(io, args.id, recorder, trajectory)
@@ -384,6 +511,19 @@ def main() -> None:
             "error_gain": args.error_gain,
             "max_pwm": args.max_pwm,
             "servo_id": args.id,
+            # Rig and configuration record (campaign 2): everything the fit
+            # does not read but the dataset must carry.
+            "zero_dd": io.zero_dd,
+            "scale_dd": io.scale_dd,
+            "cur_cap_ma": args.cur,
+            "at32_live_max_current_mA": live_cap,
+            "supply_v": args.supply_v,
+            "supply_ilim_a": args.supply_ilim,
+            "supply_note": args.supply_note,
+            "temp_start_c": temp_start,
+            "sample_scheme": "set_pos_reply",
+            "recorder_git": git_revision(),
+            **{f"at32_{name}": value for name, value in at32.items()},
             "entries": entries,
         }
         with open(filename, "w") as logfile:

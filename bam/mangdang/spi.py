@@ -55,6 +55,8 @@ CMD_GET_PARAM = 6
 CMD_GET_LIVE = 7
 CMD_SET_SCALE = 8
 CMD_RAW_REPLY = 9
+CMD_SET_PARAM = 10
+CMD_GET_STATUS = 11
 
 BAM_OK = 0
 
@@ -195,6 +197,11 @@ class SpiMd01IO:
         :meth:`sync_scale_from_board` once connected to adopt the board value.
     :param dry_run: If ``True``, never open the serial port and synthesise
         responses instead (used for offline testing of the recorder).
+    :param zero_dd: Raw deci-degree reading of the pendulum's vertical. The
+        BAM-shaped methods map ``0 rad`` here instead of the pot centre, so a
+        rig whose arm cannot be mounted exactly at the centre is still logged
+        around its true zero. ``None`` means the pot centre (``scale_dd / 2``).
+    :param cur_ma: Current cap [mA] sent with every position command.
     """
 
     def __init__(
@@ -204,12 +211,18 @@ class SpiMd01IO:
         timeout: float = 1.0,
         scale_dd: float = DEFAULT_SCALE_DD,
         dry_run: bool = False,
+        zero_dd: float | None = None,
+        cur_ma: int = DEFAULT_CUR_MA,
     ):
         self.port = port
         self.baud = baud
         self.timeout = timeout
         self.scale_dd = float(scale_dd)
         self.dry_run = dry_run
+        self._zero_dd = None if zero_dd is None else float(zero_dd)
+        self.cur_ma = int(cur_ma)
+        #: Raw `res` feedback word of the last feedback response (temperature).
+        self.last_res = 0
 
         #: Last commanded deci-degrees per servo, used by enable_torque.
         self._goal_dd: dict[int, int] = {}
@@ -241,7 +254,9 @@ class SpiMd01IO:
         self.close()
 
     # ---- transport -------------------------------------------------------
-    def _request(self, cmd: int, servo: int = 0, arg1: int = 0, arg2: int = 0) -> dict:
+    def _request(
+        self, cmd: int, servo: int = 0, arg1: int = 0, arg2: int = 0, pad: int = 0
+    ) -> dict:
         """Send one command frame and return the decoded response.
 
         A boot banner byte or a lost frame can desync the stream once, so the
@@ -252,10 +267,10 @@ class SpiMd01IO:
         :raises BridgeError: If the firmware answers with a non-OK status.
         """
         if self.dry_run:
-            return self._dry_response(cmd, servo, arg1, arg2)
+            return self._dry_response(cmd, servo, arg1, arg2, pad)
 
         head = struct.pack(
-            "<BBBBHH", MAGIC_REQ, cmd, servo, 0, arg1 & 0xFFFF, arg2 & 0xFFFF
+            "<BBBBHH", MAGIC_REQ, cmd, servo, pad & 0xFF, arg1 & 0xFFFF, arg2 & 0xFFFF
         )
         frame = head + struct.pack("<H", crc16(head))
 
@@ -323,17 +338,30 @@ class SpiMd01IO:
     # ---- raw firmware operations (mirror the C command set) --------------
     def ping(self, servo: int) -> dict:
         """Refresh one servo's feedback without changing its setpoint."""
-        return self._request(CMD_PING, servo)
+        response = self._request(CMD_PING, servo)
+        self._note_feedback(response)
+        return response
 
-    def set_pos_dd(self, servo: int, pos_dd: int, cur_ma: int = DEFAULT_CUR_MA) -> dict:
+    def _note_feedback(self, response: dict) -> None:
+        """Keep the raw ``res`` word the feedback commands return in ``val``."""
+        self.last_res = struct.unpack("<I", struct.pack("<f", response["val"]))[0]
+
+    def set_pos_dd(self, servo: int, pos_dd: int, cur_ma: int | None = None) -> dict:
         """Enter position mode and command a raw deci-degree setpoint.
 
         :param pos_dd: Raw AT32 position, clamped to ``0 .. scale_dd``.
-        :param cur_ma: Maximum current the firmware may apply [mA].
+        :param cur_ma: Maximum current the firmware may apply [mA]; defaults
+            to the driver's ``cur_ma``.
+        :returns: The response, which carries the feedback taken in the same
+            SPI transaction (position and current after the previous command).
         """
         pos_dd = max(0, min(round(self.scale_dd), round(pos_dd)))
         self._goal_dd[servo] = pos_dd
-        return self._request(CMD_SET_POS, servo, pos_dd, cur_ma)
+        response = self._request(
+            CMD_SET_POS, servo, pos_dd, self.cur_ma if cur_ma is None else cur_ma
+        )
+        self._note_feedback(response)
+        return response
 
     def set_idle(self, servo: int) -> dict:
         """Motor off: the AT32 enters idle mode and the output goes free."""
@@ -360,6 +388,28 @@ class SpiMd01IO:
     def get_live(self, servo: int, live_id: int) -> dict:
         """Read one live control-loop value from the AT32."""
         return self._request(CMD_GET_LIVE, servo, live_id)
+
+    def set_param(self, servo: int, param_id: int, value: float) -> float:
+        """Write one ``sms_config`` parameter (RAM only) and return the readback.
+
+        Any of the ten parameters can be written, including the current-loop
+        gains the recorder must control (``kp_current``, ``kff_current``,
+        ``max_pwm_duty_cycle``). Nothing is saved to the AT32 flash.
+        """
+        lo, hi = pack_float(float(value))
+        return float(self._request(CMD_SET_PARAM, servo, lo, hi, pad=param_id)["val"])
+
+    def get_status(self, servo: int) -> int:
+        """The raw 16-bit status word of the servo's feedback frame."""
+        return int(self._request(CMD_GET_STATUS, servo)["val"])
+
+    def dump_params(self, servo: int) -> dict[str, float]:
+        """Read all ``sms_config`` parameters, keyed by name."""
+        return {name: float(self.get_param(servo, pid)["val"]) for name, pid in PARAM.items()}
+
+    def dump_live(self, servo: int) -> dict[str, float]:
+        """Read all live control-loop values, keyed by name."""
+        return {name: float(self.get_live(servo, lid)["val"]) for name, lid in LIVE.items()}
 
     def set_scale_dd(self, scale_dd: float) -> float:
         """Set the host-side and firmware-side full-scale travel [deci-deg]."""
@@ -388,20 +438,30 @@ class SpiMd01IO:
         return self.set_scale_dd(reading["val"] * 10.0)
 
     # ---- unit helpers ----------------------------------------------------
+    @property
+    def zero_dd(self) -> float:
+        """Raw deci-degree reading that the BAM-shaped methods call ``0 rad``."""
+        return self.scale_dd / 2.0 if self._zero_dd is None else self._zero_dd
+
+    @zero_dd.setter
+    def zero_dd(self, value: float | None) -> None:
+        self._zero_dd = None if value is None else float(value)
+
     def rad_to_dd(self, rad: float) -> int:
         """Convert a joint angle [rad] to raw deci-degrees.
 
-        ``0.0 rad`` maps to the centre of the potentiometer travel.
+        ``0.0 rad`` maps to :attr:`zero_dd` (the pot centre unless a measured
+        vertical was given).
         """
-        return round(rad * RAD2DEG * 10.0 + self.scale_dd / 2.0)
+        return round(rad * RAD2DEG * 10.0 + self.zero_dd)
 
     def dd_to_rad(self, dd: float) -> float:
-        """Convert raw deci-degrees to a joint angle [rad], zero at centre."""
-        return (dd - self.scale_dd / 2.0) * 0.1 * DEG2RAD
+        """Convert raw deci-degrees to a joint angle [rad], zero at :attr:`zero_dd`."""
+        return (dd - self.zero_dd) * 0.1 * DEG2RAD
 
     def dd_to_deg(self, dd: float) -> float:
-        """Convert raw deci-degrees to degrees, zero at centre."""
-        return (dd - self.scale_dd / 2.0) * 0.1
+        """Convert raw deci-degrees to degrees, zero at :attr:`zero_dd`."""
+        return (dd - self.zero_dd) * 0.1
 
     # ---- BAM-driver-shaped API (what record.py calls) --------------------
     def set_mode(self, mode: dict) -> None:
@@ -506,7 +566,7 @@ class SpiMd01IO:
         """Read signed motor currents [mA]."""
         return [int(self.ping(servo)["cur_mA"]) for servo in ids]
 
-    def read_sample(self, servo: int) -> dict:
+    def read_sample(self, servo: int, response: dict | None = None) -> dict:
         """Read position, current and velocity in a single SPI transaction.
 
         Every firmware response already carries both the position and the
@@ -517,11 +577,15 @@ class SpiMd01IO:
         velocity. The recorder uses it on its hot path.
 
         :param servo: Servo id (1..12).
+        :param response: A response already obtained from a feedback command
+            (``SET_POS``/``PING``/``IDLE``); when given no extra round trip is
+            made, which is how the recorder samples while torque is on.
         :returns: Dict with ``pos_dd`` (raw), ``position`` [rad],
             ``current_mA``, ``speed`` [rad/s] and ``t`` (monotonic timestamp
             taken as soon as the response was decoded).
         """
-        response = self.ping(servo)
+        if response is None:
+            response = self.ping(servo)
         t = time.monotonic()
         dd = response["pos_dd"]
 
@@ -583,7 +647,9 @@ class SpiMd01IO:
         return found
 
     # ---- synthetic responses (dry-run only) ------------------------------
-    def _dry_response(self, cmd: int, servo: int, arg1: int, arg2: int) -> dict:
+    def _dry_response(
+        self, cmd: int, servo: int, arg1: int, arg2: int, pad: int = 0
+    ) -> dict:
         """Fabricate a response for offline testing; never touches hardware.
 
         A position command is echoed back as the measured position, so the
@@ -607,9 +673,16 @@ class SpiMd01IO:
             stored = struct.unpack("<f", struct.pack("<I", bits))[0]
             params[(servo, PARAM["kp_position" if cmd == CMD_SET_KP else "kd_position"])] = stored
             value = stored
+        elif cmd == CMD_SET_PARAM:
+            bits = arg1 | (arg2 << 16)
+            stored = struct.unpack("<f", struct.pack("<I", bits))[0]
+            params[(servo, pad)] = stored
+            value = stored
         elif cmd == CMD_GET_PARAM:
             value = params.get((servo, arg1), 0.0)
         elif cmd == CMD_GET_LIVE:
+            value = 0.0
+        elif cmd == CMD_GET_STATUS:
             value = 0.0
 
         return {
