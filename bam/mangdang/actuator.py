@@ -204,14 +204,17 @@ class MD01LoopActuator(CurrentControlledActuator):
     def initialize(self):
         # Torque constant at the output [Nm/A].
         self.model.kt = Parameter(0.6, 0.05, 2.0)
-        # Winding + bridge resistance seen at the output [ohm]; 11-13 at stall.
-        self.model.R = Parameter(11.0, 2.0, 40.0)
-        # Voltage offset of the bridge/brushes [V]; 1.2 at stall.
-        self.model.V0 = Parameter(1.2, 0.0, 3.0)
+        # The plant is measured, not fitted: a position-only fit cannot pin
+        # the current scale (kt trades against R and V0 - with free ranges
+        # the 2026-09-21 fits went to R = 2, V0 = 0, kt / 3 and a current
+        # 3x too high). The ranges are the stall-test spread: R_eff 11-13.4
+        # ohm cold to warm, V0 1.2 V, kp_ratio 1.00 to 1 %.
+        self.model.R = Parameter(11.5, 10.0, 14.0)
+        self.model.V0 = Parameter(1.2, 1.0, 1.4)
         # Apparent inertia at the output [kg m^2].
         self.model.armature = Parameter(3e-4, 1e-5, 5e-3)
-        # Scale on the measured mA/deg position gain (expected ~1).
-        self.model.kp_ratio = Parameter(1.0, 0.5, 2.0)
+        # Scale on the measured mA/deg position gain.
+        self.model.kp_ratio = Parameter(1.0, 0.95, 1.05)
 
     def compute_control(self, q_target, q, dq, dt):
         kt = self.model.kt.value
