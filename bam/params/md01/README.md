@@ -16,10 +16,12 @@ Position MAE [mrad] (reference simulator, held-out kp 120 / all) and current MAE
 Log-vs-log repeatability of the actuator: 3.3 mrad, 5 mA.
 
 Working model: m3 (kt 0.81 Nm/A, current_limit 0.566 A, load_friction_base 0.14, armature 9e-4);
-alternative m6 (kt 0.64, limit 0.67, load_friction_external 0.26). In this law kt and the limit
-are only identified as a product (kt * limit = 0.43-0.46 Nm = the stall torque; the balance
-current of the static holds gives kt ~ 0.55-0.6 Nm/A); m3 and m6 reproduce the measured current,
-m5 does not (kt 0.47 with a 1.6 gain ratio). Known deficiency: heavy loads (>= 0.3 Nm) at high
-kp stall the real arm at 1.2-1.3 rad because the gearbox's static friction is ~45 % of the
-transmitted torque; BAM's friction budgets cannot carry that, and the models lift the arm
-further (31-48 mrad on those blocks vs 10-25 elsewhere).
+alternative m6 (kt 0.64, limit 0.67, load_friction_external 0.26). kt is a gauge in this law
+(rescaling it with error_gain_ratio and current_limit leaves the position MAE unchanged); the
+physical quantity is tau_max = kt * current_limit: 0.43-0.46 Nm for m1/m3/m5/m6 (m2 0.35, m4 0.51).
+m3 and m6 reproduce the measured current; m5 does not (kt 0.47 with a 1.6 gain ratio). Physical
+kt from the breakaway pair of the static holds ~ 0.65 Nm/A. Known deficiencies: (1) the two
+heavy blocks (>= 0.3 Nm) fit at 31-48 mrad because the housing heated 18 C during each kp sweep
+and the real stall angle is non-monotonic in kp - a data confound, not a friction-structure
+limit; (2) identified at kd_position 0 while the robot preset runs 800 (up to 133 mrad log-vs-log
+on step targets); (3) the effective torque ceiling is calibrated to a 35-65 C session.
