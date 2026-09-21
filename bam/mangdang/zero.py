@@ -71,13 +71,22 @@ def main() -> None:
                 time.sleep(0.8)
                 io.set_idle(servo)
                 time.sleep(args.settle)
+                # The AT32 answers with the state at the previous frame, so
+                # the first reply after the settle is the release position.
+                io.ping(servo)
                 samples = [io.ping(servo)["pos_dd"] for _ in range(20)]
+                spread = max(samples) - min(samples)
+                if spread > 5:
+                    time.sleep(args.settle)
+                    io.ping(servo)
+                    samples = [io.ping(servo)["pos_dd"] for _ in range(20)]
+                    spread = max(samples) - min(samples)
                 rest = float(np.mean(samples))
                 rests[side].append(rest)
                 print(
                     f"rep {rep + 1} side {side}: rest {rest:.1f} dd "
                     f"({(rest - guess) * 0.1:+.2f} deg from guess), spread "
-                    f"{max(samples) - min(samples)} dd"
+                    f"{spread} dd{'  STILL MOVING' if spread > 5 else ''}"
                 )
     finally:
         try:

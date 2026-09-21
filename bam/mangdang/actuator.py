@@ -164,3 +164,81 @@ class MD01CurrentActuator(CurrentControlledActuator):
 
     def get_extra_inertia(self) -> float:
         return self.model.armature.value
+
+
+class MD01LoopActuator(CurrentControlledActuator):
+    """MD01 with the AT32's measured position/current loops (name ``md01c``).
+
+    Measured at a blocked output on 2026-09-21 (servo 6, three gain sets,
+    ``data_md01-6v2_raw/at32_stall_test.csv``):
+
+    ``i_set = clip(kp_position * error_deg, +/-cap)``  [mA] and
+    ``duty = clip(kp_current * (i_set - i) + kff_current * i_set, +/-max_pwm)``,
+
+    both exact to three digits, with the plant at stall
+    ``i = (duty * vin - V0) / R`` (``V0`` ~ 1.2 V, ``R`` ~ 11 ohm at the
+    output). Solved algebraically per step with the back-EMF ``kt * dq`` in
+    the plant, which gives the current the loop settles to; BAM's
+    ``command_delay`` absorbs the loop's few-ms rise. The firmware constants
+    come from the log (``kp``, ``at32_kp_current``, ``at32_kff_current``,
+    ``at32_max_pwm_duty_cycle``, ``cur_cap_ma``), so a change of preset needs
+    no refit; ``kp_ratio`` is a check parameter expected to fit near 1.
+    """
+
+    def __init__(self, testbench_class: Testbench):
+        super().__init__(testbench_class, vin=12.0, kp=80.0, error_gain=1.0)
+        # Firmware constants (flash values read on 2026-09-21); load_log
+        # overrides them from the log metadata when present.
+        self.kp_current = 6e-4
+        self.kff_current = 3e-4
+        self.max_pwm = 0.99
+        self.cap_ma = 1500.0
+
+    def load_log(self, log: dict):
+        super().load_log(log)
+        self.kp_current = log.get("at32_kp_current", self.kp_current)
+        self.kff_current = log.get("at32_kff_current", self.kff_current)
+        self.max_pwm = log.get("at32_max_pwm_duty_cycle", self.max_pwm)
+        self.cap_ma = log.get("cur_cap_ma", self.cap_ma)
+
+    def initialize(self):
+        # Torque constant at the output [Nm/A].
+        self.model.kt = Parameter(0.6, 0.05, 2.0)
+        # Winding + bridge resistance seen at the output [ohm]; 11-13 at stall.
+        self.model.R = Parameter(11.0, 2.0, 40.0)
+        # Voltage offset of the bridge/brushes [V]; 1.2 at stall.
+        self.model.V0 = Parameter(1.2, 0.0, 3.0)
+        # Apparent inertia at the output [kg m^2].
+        self.model.armature = Parameter(3e-4, 1e-5, 5e-3)
+        # Scale on the measured mA/deg position gain (expected ~1).
+        self.model.kp_ratio = Parameter(1.0, 0.5, 2.0)
+
+    def compute_control(self, q_target, q, dq, dt):
+        kt = self.model.kt.value
+        R = self.model.R.value
+        V0 = self.model.V0.value
+        vin = self.vin
+
+        # Position loop: current setpoint [A], capped by the frame's cap.
+        cap = self.cap_ma / 1000.0
+        i_set = (q_target - q) * (180.0 / 3.141592653589793) * self.kp * self.model.kp_ratio.value / 1000.0
+        i_set = self.backend.clamp(i_set, -cap, cap)
+
+        # Current loop (P + feed-forward, gains per mA -> per A) in steady
+        # state with the plant i = (duty*vin - V0*sign - kt*dq)/R:
+        #   i (R + vin kp_c) = vin (kp_c + kff) i_set - V0 sign(x) - kt dq
+        kp_c = self.kp_current * 1000.0
+        kff = self.kff_current * 1000.0
+        x = vin * (kp_c + kff) * i_set - kt * dq
+        sign = self.backend.sign(x)
+        magnitude = self.backend.clamp(sign * x - V0, 0.0, float("inf"))
+        current = sign * magnitude / (R + vin * kp_c)
+
+        # What the bridge can actually apply: clip the duty and recompute.
+        duty = (current * R + V0 * sign + kt * dq) / vin
+        duty = self.backend.clamp(duty, -self.max_pwm, self.max_pwm)
+        self.duty_cycle = duty
+        return (duty * vin - V0 * sign - kt * dq) / R
+
+    def get_extra_inertia(self) -> float:
+        return self.model.armature.value

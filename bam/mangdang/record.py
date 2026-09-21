@@ -335,7 +335,7 @@ def git_revision() -> str:
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         return subprocess.check_output(
-            ["git", "-C", here, "rev-parse", "--short", "HEAD"], text=True
+            ["git", "-C", here, "rev-parse", "--short", "HEAD"], text=True, stderr=subprocess.DEVNULL
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return ""

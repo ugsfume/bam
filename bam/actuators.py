@@ -15,7 +15,7 @@ from .dynamixel.actuator import (
     XL330CurrentActuator,
 )
 from .feetech.actuator import STS3215Actuator
-from .mangdang.actuator import MD01Actuator, MD01CurrentActuator
+from .mangdang.actuator import MD01Actuator, MD01CurrentActuator, MD01LoopActuator
 from .unitree.actuator import UnitreeGo1Actuator
 from .waveshare.actuator import ST3025Actuator
 
@@ -37,6 +37,7 @@ actuators = {
     # Mangdang MD01
     "md01": lambda: MD01Actuator(Pendulum),
     "md01i": lambda: MD01CurrentActuator(Pendulum),
+    "md01c": lambda: MD01LoopActuator(Pendulum),
     # Unitree Go1
     "unitree_go1": lambda: UnitreeGo1Actuator(Pendulum),
 }
